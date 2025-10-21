@@ -151,7 +151,7 @@ def parse_list_element(p: Parser, user_pred_names: set) -> Value:
         if t.typ != 'WORD':
             raise ValueError("Expected predicate word in list element")
         pred = t.text
-        if not (is_gismu(pred) or pred in user_pred_names or pred in BUILIN_PREDICATES):
+        if not (is_gismu(pred) or pred in user_pred_names or pred in BUILTIN_PREDICATES):
             raise ValueError("Not a predicate")
         args = [a1]
         for _ in range(1, 5):
