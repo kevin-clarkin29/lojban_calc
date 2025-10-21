@@ -6,9 +6,11 @@ A tiny interpreter for a simplified Lojban-inspired predicate calculus with buil
 ```bash
 # file
 python lojban_calc.py program.txt
-# or pipe
-echo 'i lo .brook. fatci' | python lojban_calc.py
+# pipe (prints 4)
+echo "i lo .X. sumji 2 2" | python lojban_calc.py
 ```
+> Note: statements that are **assertions** (e.g., `i lo .brook. fatci`) print nothing.  
+> Output only comes from **variables in the final statement**.
 
 ## Syntax (very short)
 - Program: one or more statements; each starts with `i`.
@@ -26,10 +28,9 @@ i lo pinxe cmavo lo steko lo .Brook. lo steko lo .coffee. lo steni
 i lo .X. pinxe lo .coffee.
 ```
 
-**Arithmetic:**
+**Arithmetic (prints `4`):**
 ```
-i 4 sumji 2 2
-i se 2 sumji lo .answer. 2
+i lo .X. sumji 2 2
 ```
 
 ## Output
