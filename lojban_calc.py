@@ -4,42 +4,70 @@ from dataclasses import dataclass
 from typing import List, Tuple, Union, Optional, Dict, Iterable
 import re
 import sys
-import textwrap
+# ---------------------------------------------------------------------------
+# Tokenization (Scanning)
+# ---------------------------------------------------------------------------
 
-# ----------------------------
-# Tokenization
-# ----------------------------
-
+# Only ASCII letters/digits/whitespace/periods are allowed by the assignment.
 ALLOWED_CHARS_RE = re.compile(r'^[A-Za-z0-9\s\.]*\Z')
+
+# Numbers: "0" or a non-zero digit followed by digits (no leading zeros like "007").
 NUM_RE = re.compile(r'^(0|[1-9][0-9]*)\Z')
+
+# Names: dot-wrapped ASCII letters, e.g., ".Brook." ".X."
 NAME_RE = re.compile(r'^\.[A-Za-z]+\.\Z')
 
+
 def lower_ascii(s: str) -> str:
+    """Lowercase helper (spec says uppercase/lowercase are the same)."""
     return s.lower()
 
+
 def is_gismu(word: str) -> bool:
+    """
+    Check if a word matches Lojban gismu pattern (simplified):
+      - exactly 5 letters
+      - CVCCV or CCVCV (C consonant, V vowel)
+    """
     if len(word) != 5:
         return False
     consonants = set("bcdfghjklmnpqrstvxzwy")
     vowels = set("aeiou")
     w = word
-    def C(ch): return ch in consonants
-    def V(ch): return ch in vowels
+
+    def C(ch: str) -> bool:
+        return ch in consonants
+
+    def V(ch: str) -> bool:
+        return ch in vowels
+
     return (C(w[0]) and V(w[1]) and C(w[2]) and C(w[3]) and V(w[4])) or \
            (C(w[0]) and C(w[1]) and V(w[2]) and C(w[3]) and V(w[4]))
 
+
 @dataclass
 class Token:
+    """Token with a simple type and original (lowercased) text where relevant."""
     typ: str           # 'WORD', 'NUMBER', 'NAME', 'I'
     text: str
 
+
 def tokenize(src: str) -> List[Token]:
+    """
+    Convert the raw input string into a flat token list.
+    - Validates allowed characters.
+    - Splits on whitespace boundaries but preserves periods as part of tokens.
+    - Classifies tokens as: I / NUMBER / NAME / WORD.
+    """
     if not ALLOWED_CHARS_RE.match(src):
         for ch in src:
             if not re.match(r'[A-Za-z0-9\s\.]', ch):
                 raise ValueError(f"Illegal character in input: {repr(ch)}")
+
+    # Split by whitespace; we discard the whitespace tokens.
     raw = [t for t in re.split(r'(\s+)', src) if t and not t.isspace()]
     toks: List[Token] = []
+
     for t in raw:
         lt = lower_ascii(t)
         if lt == 'i':
@@ -47,66 +75,111 @@ def tokenize(src: str) -> List[Token]:
         elif NUM_RE.match(lt):
             toks.append(Token('NUMBER', lt))
         elif NAME_RE.match(t):
+            # Keep the original dot-wrapped case to preserve display,
+            # but uppercase/lowercase are equivalent for logic here.
             toks.append(Token('NAME', t))
         else:
+            # WORD must be only letters (no punctuation besides periods, which Names consume).
             if not re.match(r'^[A-Za-z]+\Z', t):
                 raise ValueError(f"Invalid token: {t}")
             toks.append(Token('WORD', lower_ascii(t)))
     return toks
 
-# ----------------------------
-# Values & Calls
-# ----------------------------
+
+# ---------------------------------------------------------------------------
+# Values, Calls, and Rules
+# ---------------------------------------------------------------------------
 
 @dataclass(frozen=True)
 class Atom:
+    """
+    A named constant, e.g. `.brook.` — stored with the dots.
+    Atoms are *not* variables and compare by name.
+    """
     name: str
-    def __repr__(self) -> str: return self.name
+
+    def __repr__(self) -> str:
+        return self.name
+
 
 @dataclass(frozen=True)
 class Var:
+    """
+    Logical variable placeholder, e.g. `.X.`
+    In this interpreter, any ALL-CAPS dot-wrapped name is treated as a Var.
+    """
     name: str
-    def __repr__(self) -> str: return self.name
 
+    def __repr__(self) -> str:
+        return self.name
+
+
+# Values that can appear as arguments.
 Value = Union[int, 'Atom', 'ListVal', 'PredCall']
+
 
 @dataclass(frozen=True)
 class ListVal:
+    """Immutable list value (linked-list semantics in the spec; represented as a Python tuple)."""
     items: Tuple[Value, ...]
+
     def __repr__(self) -> str:
         inner = " ".join(map(repr, self.items))
         return f"({inner})"
 
+
 @dataclass
 class PredCall:
+    """A predicate call with a name and 1..5 arguments."""
     name: str
     args: List[Value]
 
+
 @dataclass
 class Rule:
+    """
+    A user-declared rule or fact:
+      head: PredCall (predicate name + arg pattern)
+      body: List[PredCall] (empty means fact)
+    """
     head: PredCall
     body: List[PredCall]
 
-# ----------------------------
+
+# ---------------------------------------------------------------------------
 # Parser
-# ----------------------------
+# ---------------------------------------------------------------------------
 
 class Parser:
+    """Simple pointer-based parser over the token list."""
+
     def __init__(self, tokens: List[Token]):
         self.toks = tokens
         self.i = 0
+
     def peek(self) -> Optional[Token]:
         return self.toks[self.i] if self.i < len(self.toks) else None
+
     def take(self) -> Token:
         if self.i >= len(self.toks):
             raise ValueError("Unexpected end of input")
-        t = self.toks[self.i]; self.i += 1; return t
+        t = self.toks[self.i]
+        self.i += 1
+        return t
+
     def at_end(self) -> bool:
         return self.i >= len(self.toks)
 
+
+# Built-in predicate names (recognized as valid predicates without prior declaration).
 BUILTIN_PREDICATES = {"fatci", "sumji", "vujni", "dunli", "steni", "steko", "cmavo"}
 
+
 def parse_name_as_value(tok: Token) -> Value:
+    """
+    Convert a NAME token into a Var or Atom.
+    Convention: if the inner part is ALL CAPS, treat it as a Var; else an Atom.
+    """
     nm = tok.text
     inner = nm.strip('.')
     if inner.isupper():
@@ -114,72 +187,132 @@ def parse_name_as_value(tok: Token) -> Value:
     else:
         return Atom(nm)
 
+
 def parse_number(tok: Token) -> int:
+    """NUMBER tokens are already validated; just int() them."""
     return int(tok.text)
 
+
 def parse_argument(p: Parser, user_pred_names: set) -> Value:
+    """
+    Parse a single argument value.
+    Allowed forms (per spec):
+      - NUMBER
+      - "lo steni"                       => empty list
+      - "lo steko <elem> <tail-list>"    => list literal
+      - "lo .Name."                      => atom/var
+      - "lo word"                        => treat word as atom ".word."
+    Note: The spec requires names to be preceded by "lo". This parser is slightly lenient and
+    accepts bare NAME (dot-wrapped) too; feel free to remove that if strictness is required.
+    """
     t = p.peek()
-    if t is None: raise ValueError("Unexpected end while parsing argument")
+    if t is None:
+        raise ValueError("Unexpected end while parsing argument")
+
+    # NUMBER
     if t.typ == 'NUMBER':
-        p.take(); return parse_number(t)
-    if t.typ == 'WORD' and t.text == 'lo':
         p.take()
+        return parse_number(t)
+
+    # "lo ..." forms
+    if t.typ == 'WORD' and t.text == 'lo':
+        p.take()  # consume 'lo'
         nxt = p.take()
+
+        # Empty list literal
         if nxt.typ == 'WORD' and nxt.text == 'steni':
             return ListVal(())
+
+        # List cons literal: "lo steko <head> <tail-list>"
         elif nxt.typ == 'WORD' and nxt.text == 'steko':
             head = parse_list_element(p, user_pred_names)
             tail = parse_argument(p, user_pred_names)
             if not isinstance(tail, ListVal):
-                raise ValueError("steko must be followed by list (lo steni/lo steko ...)")
+                raise ValueError("steko must be followed by a list (lo steni / lo steko ...)")
             return ListVal((head,) + tail.items)
+
+        # Name literal: dot-wrapped
         elif nxt.typ == 'NAME':
             return parse_name_as_value(nxt)
+
+        # Word used as a name: treat as Atom(".word.")
         elif nxt.typ == 'WORD':
             return Atom(f".{nxt.text}.")
+
         else:
             raise ValueError(f"Invalid token after 'lo': {nxt.text}")
+
+    # Lenient: accept bare NAME (dot-wrapped) as an argument.
     if t.typ == 'NAME':
-        p.take(); return parse_name_as_value(t)
+        p.take()
+        return parse_name_as_value(t)
+
     raise ValueError(f"Invalid argument start: {t.text}")
 
+
 def parse_list_element(p: Parser, user_pred_names: set) -> Value:
+    """
+    Parse a list element.
+    - Either a plain argument value,
+    - Or a mini predicate application `(<arg> <predicate> <arg> ...)`,
+      which is used inside `cmavo` bodies.
+    We attempt the predicate-call shape first; if it fails we roll back and parse a plain argument.
+    """
     save = p.i
     try:
-        a1 = parse_argument(p, user_pred_names)
-        t = p.take()
+        a1 = parse_argument(p, user_pred_names)  # first thing could be an arg
+        t = p.take()                              # expect a predicate word next
         if t.typ != 'WORD':
             raise ValueError("Expected predicate word in list element")
         pred = t.text
         if not (is_gismu(pred) or pred in user_pred_names or pred in BUILTIN_PREDICATES):
+            # Not a predicate — roll back and parse as plain element.
             raise ValueError("Not a predicate")
+        # Parse up to 4 more arguments (total 5 max per spec).
         args = [a1]
         for _ in range(1, 5):
             nxt = p.peek()
-            if nxt is None: break
-            if nxt.typ == 'I': break
+            if nxt is None or nxt.typ == 'I':
+                break
             try:
                 args.append(parse_argument(p, user_pred_names))
             except Exception:
                 break
         return PredCall(pred, args)
     except Exception:
+        # Roll back and treat it as a plain argument.
         p.i = save
         return parse_argument(p, user_pred_names)
 
+
 @dataclass
 class Statement:
+    """A top-level statement is just a single predicate call (after handling `se` swaps)."""
     call: PredCall
 
+
 class Program:
+    """
+    Program = rule database + value store + evaluator.
+    - `rules`: user-declared predicates (facts/rules) via `cmavo`.
+    - `store`: concrete value assignments to atoms (e.g., `.answer.` -> 42, or lists).
+    """
+
     def __init__(self):
         self.rules: Dict[str, List[Rule]] = {}
         self.store: Dict[str, Value] = {}
 
+    # ---------------- Parsing entry ----------------
+
     def parse(self, src: str) -> List[Statement]:
+        """
+        Parse the entire input into a list of statements.
+        Every statement must start with 'i'.
+        """
         tokens = tokenize(src)
         p = Parser(tokens)
         stmts: List[Statement] = []
+
         while not p.at_end():
             t = p.take()
             if t.typ != 'I':
@@ -188,139 +321,230 @@ class Program:
         return stmts
 
     def _parse_statement_body(self, p: Parser) -> Statement:
+        """
+        Parse tokens up to the next 'i' (or end) as a single statement.
+        Handles optional `se` before the 1st or 2nd argument by swapping the first two args.
+        """
+        # Extract the segment of tokens that belong to this statement.
         seg: List[Token] = []
         while not p.at_end() and p.peek().typ != 'I':
             seg.append(p.take())
+
         sp = Parser(seg)
-        # Optional 'se' before first arg
+
+        # Optional 'se' before first argument.
         pre_se = False
         if sp.peek() and sp.peek().typ == 'WORD' and sp.peek().text == 'se':
-            sp.take(); pre_se = True
+            sp.take()
+            pre_se = True
+
+        # First argument
         arg1 = parse_argument(sp, set(self.rules.keys()))
+
+        # Predicate word
         tw = sp.take()
-        if tw.typ != 'WORD': raise ValueError("Expected a predicate word")
+        if tw.typ != 'WORD':
+            raise ValueError("Expected a predicate word")
         pred = tw.text
         if not (is_gismu(pred) or pred in self.rules or pred in BUILTIN_PREDICATES):
             raise ValueError(f"Unknown or invalid predicate word: {pred}")
-        # Optional 'se' before second arg
+
+        # Optional 'se' before the second argument.
         post_se = False
         if sp.peek() and sp.peek().typ == 'WORD' and sp.peek().text == 'se':
-            sp.take(); post_se = True
+            sp.take()
+            post_se = True
+
+        # Parse the rest of the arguments.
         args: List[Value] = [arg1]
+
         if pred == 'cmavo':
-            # Accept 2 or 3 args (body defaults to empty list)
+            # cmavo takes 2 or 3 arguments (body defaults to empty list if omitted).
             arglist = parse_argument(sp, set(self.rules.keys()))
-            bodylist: Value
             if not sp.at_end():
                 try:
-                    bodylist = parse_argument(sp, set(self.rules.keys()))
+                    bodylist: Value = parse_argument(sp, set(self.rules.keys()))
                 except Exception:
-                    bodylist = ListVal(())
+                    bodylist = ListVal(())  # default empty body
             else:
                 bodylist = ListVal(())
             args.extend([arglist, bodylist])
         else:
+            # Other predicates: collect 0..4 more arguments (we don't strictly enforce 5 here;
+            # the built-ins enforce arity during evaluation).
             while not sp.at_end():
                 args.append(parse_argument(sp, set(self.rules.keys())))
+
+        # Apply `se` swap if present before first or second arg.
         if pre_se or post_se:
             if len(args) >= 2:
                 args[0], args[1] = args[1], args[0]
+
         return Statement(PredCall(pred, args))
 
+    # ---------------- Evaluation ----------------
+
     def eval(self, stmts: List[Statement]) -> List[str]:
+        """
+        Evaluate all but the last statement as assertions.
+        Evaluate the final statement as a query and return printable results:
+        the values of variables that appear in the final statement.
+        """
+        # Assert (evaluate) all but last.
         for st in stmts[:-1]:
             self._eval_statement(st, as_query=False)
+
+        # Evaluate last; obtain bindings.
         result_bindings = self._eval_statement(stmts[-1], as_query=True)
+
+        # Collect variables from the final statement to decide what to print.
         final_vars: List[Var] = []
+
         def collect_vars(v: Value):
-            if isinstance(v, Var): final_vars.append(v)
+            if isinstance(v, Var):
+                final_vars.append(v)
             elif isinstance(v, ListVal):
-                for it in v.items: collect_vars(it)
-        for a in stmts[-1].call.args: collect_vars(a)
-        seen = set(); outputs: List[str] = []
+                for it in v.items:
+                    collect_vars(it)
+
+        for a in stmts[-1].call.args:
+            collect_vars(a)
+
+        # Deduplicate variables and format their bound values.
+        seen = set()
+        outputs: List[str] = []
         for v in final_vars:
-            if v.name in seen: continue
+            if v.name in seen:
+                continue
             seen.add(v.name)
             bound = result_bindings.get(v.name)
             outputs.append(render_value(bound) if bound is not None else f"{v.name}=unbound")
         return outputs
 
     def _eval_statement(self, st: Statement, as_query: bool) -> Dict[str, Value]:
+        """Evaluate a single statement; returns variable bindings (if any)."""
         call = st.call
         if call.name in BUILTIN_PREDICATES:
             return self._eval_builtin(call, as_query)
+
+        # User-defined predicate: try to solve using the rules.
         rules = self.rules.get(call.name, [])
         for sol in solve(call, rules, self):
-            return sol
+            return sol  # first solution only
         return {}
 
+    # ---------------- Built-in semantics ----------------
+
     def _eval_builtin(self, call: PredCall, as_query: bool) -> Dict[str, Value]:
+        """
+        Implement the required built-ins. Some (like `sumji`, `vujni`, `steni`, `steko`)
+        can produce variable bindings for their first argument when it's a Var.
+        """
         name = call.name
+
         if name == 'fatci':
-            if len(call.args) != 1: raise ValueError("fatci takes exactly 1 argument")
+            # unary: asserts existence
+            if len(call.args) != 1:
+                raise ValueError("fatci takes exactly 1 argument")
             if isinstance(call.args[0], Atom):
+                # record existence as a stored fact (maps to itself)
                 self.store[call.args[0].name] = call.args[0]
             return {}
+
         if name == 'sumji':
-            if len(call.args) != 3: raise ValueError("sumji takes exactly 3 arguments")
+            if len(call.args) != 3:
+                raise ValueError("sumji takes exactly 3 arguments")
             a2 = evaluate_value(call.args[1], self.store)
             a3 = evaluate_value(call.args[2], self.store)
             if not (isinstance(a2, int) and isinstance(a3, int)):
                 raise ValueError("sumji: arguments 2 and 3 must be numbers")
             res = a2 + a3
             return self._assign_or_check(call.args[0], res)
+
         if name == 'vujni':
-            if len(call.args) != 3: raise ValueError("vujni takes exactly 3 arguments")
+            if len(call.args) != 3:
+                raise ValueError("vujni takes exactly 3 arguments")
             a2 = evaluate_value(call.args[1], self.store)
             a3 = evaluate_value(call.args[2], self.store)
             if not (isinstance(a2, int) and isinstance(a3, int)):
                 raise ValueError("vujni: arguments 2 and 3 must be numbers")
             res = a2 - a3
             return self._assign_or_check(call.args[0], res)
+
         if name == 'dunli':
-            if len(call.args) != 2: raise ValueError("dunli takes exactly 2 arguments")
+            if len(call.args) != 2:
+                raise ValueError("dunli takes exactly 2 arguments")
             a1 = evaluate_value(call.args[0], self.store)
             a2 = evaluate_value(call.args[1], self.store)
             if not value_equal(a1, a2):
                 raise ValueError("dunli: arguments are not equal")
             return {}
+
         if name == 'steni':
-            if len(call.args) != 1: raise ValueError("steni takes exactly 1 argument")
+            if len(call.args) != 1:
+                raise ValueError("steni takes exactly 1 argument")
+            # Assign empty list to first argument (name/var).
             return self._assign_or_check(call.args[0], ListVal(()))
+
         if name == 'steko':
-            if len(call.args) not in (2, 3): raise ValueError("steko takes 2 or 3 arguments")
+            # arg1 := cons(head, tail)
+            if len(call.args) not in (2, 3):
+                raise ValueError("steko takes 2 or 3 arguments")
             head = evaluate_value(call.args[1], self.store)
             tail = ListVal(())
             if len(call.args) == 3:
                 tail = evaluate_value(call.args[2], self.store)
-                if not isinstance(tail, ListVal): raise ValueError("steko: third argument must be a list")
+                if not isinstance(tail, ListVal):
+                    raise ValueError("steko: third argument must be a list")
             lst = ListVal((head,) + tail.items)
             return self._assign_or_check(call.args[0], lst)
+
         if name == 'cmavo':
+            # Declare a predicate (fact or rule).
+            # args: [ predicate-name, arg-list, (optional) body-list ]
             if len(call.args) != 3:
-                raise ValueError("cmavo takes 3 args internally (parser supplies empty body if omitted)")
+                # Parser guarantees body defaults to empty list; this is just a safety check.
+                raise ValueError("cmavo takes 3 args internally")
             pred_name_val = call.args[0]
+
+            # Predicate name can be Atom(".name.") or Var(".X.") (we accept both; we use the inner text).
             if isinstance(pred_name_val, Atom):
                 pred_name = pred_name_val.name.strip('.')
             elif isinstance(pred_name_val, Var):
                 pred_name = pred_name_val.name.strip('.')
             else:
                 raise ValueError("cmavo: predicate name must be a name or word")
+
+            # Argument list must be a ListVal
             arglist_val = evaluate_value(call.args[1], self.store)
             if not isinstance(arglist_val, ListVal):
                 raise ValueError("cmavo: second argument must be a list")
             arg_vars: List[Value] = list(arglist_val.items)
+
+            # Body list: each element that parses as PredCall is a body goal.
             body_val = evaluate_value(call.args[2], self.store)
             body_calls: List[PredCall] = []
             if isinstance(body_val, ListVal):
                 for elem in body_val.items:
-                    if isinstance(elem, PredCall): body_calls.append(elem)
+                    if isinstance(elem, PredCall):
+                        body_calls.append(elem)
+
+            # Register rule
             rule = Rule(PredCall(pred_name, arg_vars), body_calls)
             self.rules.setdefault(pred_name, []).append(rule)
             return {}
+
         raise ValueError(f"Unknown builtin: {name}")
 
+    # ---------------- Helpers for assignment/consistency ----------------
+
     def _assign_or_check(self, target: Value, value: Value) -> Dict[str, Value]:
+        """
+        Assign `value` to `target` when target is an Atom (store) or a Var (return binding).
+        If the Atom already has a value in the store, enforce consistency.
+        If the target is a concrete non-Var non-Atom value, enforce equality.
+        """
+        # Atom: assign into store (or check consistency)
         if isinstance(target, Atom):
             key = target.name
             if key in self.store:
@@ -329,129 +553,220 @@ class Program:
             else:
                 self.store[key] = value
             return {}
+
+        # Var: produce a substitution binding
         if isinstance(target, Var):
             return {target.name: value}
+
+        # Concrete value on the left-hand side: must equal
         if not value_equal(evaluate_value(target, self.store), value):
             raise ValueError("Assignment target does not match value")
+
         return {}
 
-# ----------------------------
-# Unification / solving
-# ----------------------------
 
+# ---------------------------------------------------------------------------
+# Unification and Rule Solving
+# ---------------------------------------------------------------------------
+
+# Substitution map for variables (key is Var.name, e.g., ".X.")
 Subst = Dict[str, Value]
 
+
 def evaluate_value(v: Value, store: Dict[str, Value]) -> Value:
-    if isinstance(v, Atom): return store.get(v.name, v)
-    if isinstance(v, ListVal): return ListVal(tuple(evaluate_value(it, store) for it in v.items))
+    """Resolve Atoms via the store; recursively evaluate list contents."""
+    if isinstance(v, Atom):
+        return store.get(v.name, v)
+    if isinstance(v, ListVal):
+        return ListVal(tuple(evaluate_value(it, store) for it in v.items))
     return v
 
+
 def value_equal(a: Value, b: Value) -> bool:
-    if isinstance(a, Atom) and isinstance(b, Atom): return a.name == b.name
-    if isinstance(a, int) and isinstance(b, int): return a == b
+    """Structural equality for lists, exact equality for numbers and atoms."""
+    if isinstance(a, Atom) and isinstance(b, Atom):
+        return a.name == b.name
+    if isinstance(a, int) and isinstance(b, int):
+        return a == b
     if isinstance(a, ListVal) and isinstance(b, ListVal):
         return len(a.items) == len(b.items) and all(value_equal(x, y) for x, y in zip(a.items, b.items))
     return False
 
+
 def unify(a: Value, b: Value, subst: Subst, store: Dict[str, Value]) -> Optional[Subst]:
+    """
+    Standard unification for our Value domain.
+    - Atoms are dereferenced through `store` so that known assignments participate in unification.
+    - Occurs-check to avoid infinite terms.
+    """
     def deref(v: Value) -> Value:
-        if isinstance(v, Atom): return store.get(v.name, v)
+        if isinstance(v, Atom):
+            return store.get(v.name, v)
         return v
-    a = deref(a); b = deref(b)
-    if isinstance(a, Var): return unify_var(a, b, subst, store)
-    if isinstance(b, Var): return unify_var(b, a, subst, store)
-    if isinstance(a, int) and isinstance(b, int): return subst if a == b else None
-    if isinstance(a, Atom) and isinstance(b, Atom): return subst if a.name == b.name else None
+
+    a = deref(a)
+    b = deref(b)
+
+    # Variable cases
+    if isinstance(a, Var):
+        return unify_var(a, b, subst, store)
+    if isinstance(b, Var):
+        return unify_var(b, a, subst, store)
+
+    # Primitives / lists
+    if isinstance(a, int) and isinstance(b, int):
+        return subst if a == b else None
+    if isinstance(a, Atom) and isinstance(b, Atom):
+        return subst if a.name == b.name else None
     if isinstance(a, ListVal) and isinstance(b, ListVal):
-        if len(a.items) != len(b.items): return None
+        if len(a.items) != len(b.items):
+            return None
         for x, y in zip(a.items, b.items):
             subst = unify(x, y, subst, store)
-            if subst is None: return None
+            if subst is None:
+                return None
         return subst
+
+    # Mismatch
     return None
 
+
 def unify_var(v: Var, x: Value, subst: Subst, store: Dict[str, Value]) -> Optional[Subst]:
-    if v.name in subst: return unify(subst[v.name], x, subst, store)
-    if occurs_in(v, x, subst, store): return None
-    subst[v.name] = x; return subst
+    """Bind variable v to x, with occurs-check and recursive dereferencing of existing bindings."""
+    if v.name in subst:
+        return unify(subst[v.name], x, subst, store)
+    if occurs_in(v, x, subst, store):
+        return None
+    subst[v.name] = x
+    return subst
+
 
 def occurs_in(v: Var, x: Value, subst: Subst, store: Dict[str, Value]) -> bool:
+    """Occurs-check to prevent v = f(v, ...) cycles."""
     if isinstance(x, Var):
-        if x.name == v.name: return True
-        if x.name in subst: return occurs_in(v, subst[x.name], subst, store)
+        if x.name == v.name:
+            return True
+        if x.name in subst:
+            return occurs_in(v, subst[x.name], subst, store)
         return False
     if isinstance(x, ListVal):
         return any(occurs_in(v, it, subst, store) for it in x.items)
     return False
 
-def solve(goal: PredCall, rules: List[Rule], program: 'Program') -> Iterable[Subst]:
+
+def solve(goal: PredCall, rules: List[Rule], program: Program) -> Iterable[Subst]:
+    """
+    Depth-first backtracking solver for user-defined predicates.
+    Yields substitutions (bindings) that satisfy the goal.
+    """
     for rule in rules:
-        if rule.head.name != goal.name: continue
-        if len(rule.head.args) != len(goal.args): continue
+        if rule.head.name != goal.name:
+            continue
+        if len(rule.head.args) != len(goal.args):
+            continue
+
+        # Start with empty substitution and unify head arguments.
         subst: Subst = {}
         ok = True
         for a, b in zip(rule.head.args, goal.args):
             sub2 = unify(a, b, subst, program.store)
-            if sub2 is None: ok = False; break
+            if sub2 is None:
+                ok = False
+                break
             subst = sub2
-        if not ok: continue
+        if not ok:
+            continue
+
+        # If the rule has no body, it's a fact — solution found.
         if not rule.body:
-            yield subst; continue
+            yield subst
+            continue
+
+        # Otherwise, solve the body predicates in sequence.
         def solve_body(idx: int, subst: Subst) -> Iterable[Subst]:
-            if idx == len(rule.body): 
-                yield subst; return
+            if idx == len(rule.body):
+                yield subst
+                return
+
             body_call = rule.body[idx]
+
+            # Apply current substitution to the body call.
             applied_args = [apply_subst(arg, subst, program.store) for arg in body_call.args]
             applied = PredCall(body_call.name, applied_args)
+
+            # Built-ins inside bodies are evaluated directly.
             if applied.name in BUILTIN_PREDICATES:
                 try:
                     result = program._eval_builtin(applied, as_query=True)
                 except Exception:
+                    # Built-in failed => this branch fails.
                     return
                 new_subst = subst.copy()
                 new_subst.update(result)
                 yield from solve_body(idx + 1, new_subst)
             else:
+                # Recurse into user rules for the body predicate.
                 for deeper in solve(applied, program.rules.get(applied.name, []), program):
-                    merged = subst.copy(); merged.update(deeper)
+                    merged = subst.copy()
+                    merged.update(deeper)
                     yield from solve_body(idx + 1, merged)
+
         yield from solve_body(0, subst)
 
+
 def apply_subst(v: Value, subst: Subst, store: Dict[str, Value]) -> Value:
-    if isinstance(v, Var): return subst.get(v.name, v)
-    if isinstance(v, ListVal): return ListVal(tuple(apply_subst(it, subst, store) for it in v.items))
-    if isinstance(v, Atom): return store.get(v.name, v)
+    """Apply a substitution to a value (used for body calls); also resolve Atoms via store."""
+    if isinstance(v, Var):
+        return subst.get(v.name, v)
+    if isinstance(v, ListVal):
+        return ListVal(tuple(apply_subst(it, subst, store) for it in v.items))
+    if isinstance(v, Atom):
+        return store.get(v.name, v)
     return v
 
+
 def render_value(v: Value) -> str:
-    if isinstance(v, int): return str(v)
-    if isinstance(v, Atom): return v.name
+    """Pretty-print a value for output: numbers, atoms, or lists."""
+    if isinstance(v, int):
+        return str(v)
+    if isinstance(v, Atom):
+        return v.name
     if isinstance(v, ListVal):
-        inner = " ".join(render_value(it) for it in v.items); return f"({inner})"
-    if isinstance(v, Var): return v.name
+        inner = " ".join(render_value(it) for it in v.items)
+        return f"({inner})"
+    if isinstance(v, Var):
+        return v.name
     return str(v)
 
-# ----------------------------
-# Public API
-# ----------------------------
+
+# ---------------------------------------------------------------------------
+# Public API + CLI
+# ---------------------------------------------------------------------------
 
 def run_program(src: str) -> List[str]:
+    """
+    Parse and evaluate a program string and return printable results (strings).
+    """
     prog = Program()
     stmts = prog.parse(src)
     return prog.eval(stmts)
 
-# ----------------------------
-# CLI
-# ----------------------------
 
-def main():
+def main() -> None:
+    """
+    CLI entry point:
+      - If a file path is supplied, read it; otherwise, read stdin.
+      - Print outputs (one per line).
+    """
     if len(sys.argv) > 1:
         with open(sys.argv[1], "r", encoding="utf-8") as f:
             src = f.read()
     else:
         src = sys.stdin.read()
+
     outs = run_program(src)
     print("\n".join(outs))
+
 
 if __name__ == "__main__":
     main()
